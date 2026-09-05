@@ -1,11 +1,17 @@
 ## IDF Component Manager Manifest File
 dependencies:
   espressif/usb_host_cdc_acm: "^2.0.4"
-  sukuwc/grid_common: "*"
   sukuwc/grid_esp32_led: "*"
   sukuwc/grid_esp32_nvm: "*"
   sukuwc/grid_esp32_littlefs: "*"
-  joltwallet/littlefs: "*"
+  # NOTE: grid_common / littlefs / tinyusb / tomlc99 are vendored as LOCAL
+  # components under Firmware/components/ (matching intechstudio/grid-fw).
+  # grid_common as published on the registry needs littlefs/tinyusb/tomlc99
+  # but does not declare them, and the registry versions of
+  # joltwallet/littlefs + espressif/esp_tinyusb are incompatible with it.
+  # grid_common itself is vendored (not just its 3 deps) so grid_usb.c can be
+  # patched for a clean "Knot MIDI" USB identity instead of Grid's
+  # CDC+MIDI+HID composite - see grid_common/common/src/c/grid_usb.c.
   ## Required IDF version
   idf:
     version: ">=4.1.0"

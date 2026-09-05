@@ -1,0 +1,83 @@
+#ifndef GRID_UI_ENDLESS_H
+#define GRID_UI_ENDLESS_H
+
+#include <stdint.h>
+
+#include "grid_protocol.h"
+#include "grid_ui.h"
+#include "grid_ui_button.h"
+
+struct grid_ui_endless_sample {
+  uint16_t phase_a;
+  uint16_t phase_b;
+  uint16_t button_value;
+};
+
+struct grid_ui_endless_state {
+  struct grid_ui_element* parent;
+  uint64_t encoder_last_real_time;
+  double delta_vel_frac;
+  uint16_t prev_norm;
+  uint8_t adc_bit_depth;
+  struct grid_ui_button_state button;
+};
+
+void grid_ui_endless_state_init(struct grid_ui_endless_state* state, uint8_t adc_bit_depth, uint8_t button_adc_bit_depth, double button_threshold, double button_hysteresis);
+
+void grid_ui_element_endless_init(struct grid_ui_element* ele);
+void grid_ui_element_endless_template_parameter_init(struct grid_ui_template_buffer* buf);
+
+static inline struct grid_ui_endless_state* grid_ui_endless_get_state(struct grid_ui_element* ele) { return (struct grid_ui_endless_state*)ele->primary_state; }
+
+void grid_ui_endless_store_input(struct grid_ui_endless_state* state, struct grid_ui_endless_sample sample);
+
+uint8_t grid_ui_endless_update_trigger(struct grid_ui_element* ele, uint16_t norm, int16_t delta, double* delta_frac, uint64_t* last_real_time);
+
+// ========================= ENDLESS POTEMETER =========================== //
+
+// clang-format off
+
+#define GRID_LUA_EP_TYPE "Endless"
+
+extern const luaL_Reg GRID_LUA_EP_INDEX_META[];
+
+#define GRID_LUA_EP_META_init \
+  GRID_LUA_EP_TYPE " = { __index = {" \
+  "type = 'endless', "\
+  \
+  "post_init_cb = function (self) " \
+  "self:"GRID_LUA_FNC_A_INIT_short"() " \
+  "self:"GRID_LUA_FNC_A_BUTTON_short"() " \
+  "self:"GRID_LUA_FNC_A_ENDLESS_short"() " \
+  "end," \
+  \
+  GRID_LUA_FNC_ASSIGN_META_PAR1_RET("gen", GRID_LUA_FNC_G_ELEMENTNAME_short) "," \
+  \
+  GRID_LUA_FNC_EP_BUTTON_STEP_short " =function (self) " \
+  "local steps, min, max, value = self:" GRID_LUA_FNC_EP_BUTTON_MODE_short "(), self:" GRID_LUA_FNC_EP_BUTTON_MIN_short "(), self:" GRID_LUA_FNC_EP_BUTTON_MAX_short \
+  "(), self:" GRID_LUA_FNC_EP_BUTTON_VALUE_short "() " \
+  "if steps == 0 then return false end " \
+  "return value // ((max - min) // steps) " \
+  "end," \
+  \
+  GRID_LUA_FNC_ASSIGN_META_EVENT(INIT, ENDLESS_INIT) \
+  GRID_LUA_FNC_ASSIGN_META_EVENT(ENDLESS, ENDLESS_ENDLESS) \
+  GRID_LUA_FNC_ASSIGN_META_EVENT(BUTTON, ENDLESS_BUTTON) \
+  \
+  "}}"
+
+#define GRID_ACTIONSTRING_ENDLESS_INIT "--[[@cb]]--[[Endless Init]]"
+
+#define GRID_ACTIONSTRING_ENDLESS_ENDLESS \
+  "--[[@sen]]self:epmo(0)self:epv0(50)self:epmi(0)self:epma(127)self:epse(50)" \
+  "--[[@sglc]]self:glc(-1,{{-1,-1,-1,1}})self:glp(-1,-1)" \
+  "--[[@gms]]self:gms(-1,-1,-1,-1)"
+
+#define GRID_ACTIONSTRING_ENDLESS_BUTTON \
+  "--[[@sbc]]self:bmo(0)self:bmi(0)self:bma(127)" \
+  "--[[@sglc]]self:glc(-1,{{-1,-1,-1,1}})self:glp(-1,-1)" \
+  "--[[@gms]]self:gms(-1,-1,-1,-1)"
+
+// clang-format on
+
+#endif /* GRID_UI_ENDLESS_H */
