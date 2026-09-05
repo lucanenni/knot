@@ -1,0 +1,9 @@
+# --- Knot USB-C MIDI interface mode (KNOT_USB_MODE_INTERFACE) --------------
+# The device-side TinyUSB stack is the local `tinyusb` component with a static
+# include/tusb_config.h (no CONFIG_TINYUSB_* symbols).
+#
+# The USB-OTG pads (GPIO19/20) are shared with USB-Serial-JTAG. In interface
+# mode TinyUSB owns the OTG, so the JTAG console can't run on the same pads -
+# drop the secondary console to avoid peripheral contention. Primary console
+# stays on UART0.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

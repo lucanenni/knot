@@ -1,0 +1,45 @@
+# Fork-only CI: build the firmware directly with a stock ESP-IDF v5.5 image
+# (the upstream _firmware_build.yml uses Intech's private builder image).
+#
+# This repo vendors grid-fw's local components (tinyusb / littlefs / tomlc99),
+# so a plain `idf.py build` works without extra setup.
+name: fork firmware build
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "Firmware/**"
+      - ".github/workflows/fork_firmware_build.yml"
+  pull_request:
+    paths:
+      - "Firmware/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: ESP-IDF build (esp32s3, v5.5)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5
+          target: esp32s3
+          path: Firmware
+
+      - name: Convert to UF2
+        working-directory: Firmware
+        run: python3 ./tools/uf2conv.py -f ESP32S3 ./build/midi_host_fw.bin -b 0x0 -c -o ./midi_host_fw.uf2
+
+      - name: Translator host tests
+        working-directory: Firmware/components/knot_midi_translator/host_test
+        run: ./test.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knot-firmware-uf2
+          path: Firmware/midi_host_fw.uf2

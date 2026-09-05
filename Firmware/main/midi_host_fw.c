@@ -199,11 +199,14 @@ void app_main(void) {
 // must be last freertos relevant header to avoid #error
 #include "esp_freertos_hooks.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "knot_midi_queue.h"
 #include "knot_midi_uart.h"
 #include "knot_midi_usb.h"
+#include "knot_midi_usb_device.h"
+#include "knot_usb_mode.h"
 
 #include "grid_littlefs.h"
 #include "grid_platform.h"
@@ -225,18 +228,26 @@ void app_main(void) {
 
 static const char* TAG = "DAEMON";
 
+// USB operating mode, latched once at boot from usbmode.cfg (see knot_usb_mode).
+static knot_usb_mode_t g_usb_mode = KNOT_USB_MODE_HOST;
+
+// Paint LED index 2 (UI_A layer) to reflect the MIDI-thru state.
+// Same green/blue convention in both USB modes.
+static void knot_status_led_update(void) {
+  if (knot_midi_uart_get_midithrough_state(&knot_midi_uart_state)) {
+    grid_led_set_layer_color(&grid_led_state, 2, GRID_LED_LAYER_UI_A, 0, 0, 255); // blue = thru on
+  } else {
+    grid_led_set_layer_color(&grid_led_state, 2, GRID_LED_LAYER_UI_A, 0, 255, 0); // green = thru off
+  }
+}
+
 void midi_config_file_update(uint8_t state) {
 
   ESP_LOGI(TAG, "midi_config_file_update, state: %d", state);
 
-  const char data[1] = {state ? '1' : '0'};
-
-  int status;
-
-  status = grid_platform_write_file("midithrough.cfg", (uint8_t*)&data, 1);
+  int status = grid_platform_write_file_contents(state ? "1" : "0", "midithrough.cfg");
   if (status) {
-    grid_platform_printf("grid_platform_write_file returned %d\n", status);
-    return;
+    grid_platform_printf("grid_platform_write_file_contents returned %d\n", status);
   }
 }
 
@@ -244,32 +255,14 @@ uint8_t midi_config_file_read(void) {
 
   ESP_LOGI(TAG, "midi_config_file_read");
 
-  struct grid_file_t handle = {0};
-
-  int status;
-
-  status = grid_platform_find_file("midithrough.cfg", &handle);
-  if (status) {
-    grid_platform_printf("grid_platform_find_file returned %d\n", status);
+  char* contents = grid_platform_read_file_contents("midithrough.cfg");
+  if (contents == NULL) {
     return 0;
   }
 
-  char data[1];
-
-  status = grid_platform_read_file(&handle, (uint8_t*)&data, 1);
-  if (status) {
-    grid_platform_printf("grid_platform_read_file returned %d\n", status);
-    return 0;
-  }
-
-  if (data[0] != '0' && data[0] != '1') {
-    grid_platform_printf("the first character in the file is not 0 or 1\n", data[0]);
-    return 0;
-  }
-
-  grid_platform_printf("the first character in the file is: %c\n", data[0]);
-
-  return data[0] - '0';
+  uint8_t state = (contents[0] == '1') ? 1 : 0;
+  free(contents);
+  return state;
 }
 
 static void host_lib_daemon_task(void* arg) {
@@ -358,7 +351,7 @@ void knot_lua_ui_init(struct grid_lua_model* lua) {
 
 void knot_module_ui_init(struct grid_ain_model* ain, struct grid_led_model* led, struct grid_ui_model* ui) {
 
-  grid_led_init(led, 3);
+  grid_led_init(led, 3, NULL);
   grid_ui_model_init(ui, 0 + 1); // +1 for the system element
 
   grid_ui_element_system_init(&ui->element_list[ui->element_list_length - 1]);
@@ -434,16 +427,7 @@ void app_main(void) {
 
   ESP_LOGI(TAG, "===== LUA INIT =====");
   grid_lua_init(&grid_lua_state, NULL, NULL);
-  grid_lua_set_memory_target(&grid_lua_state, 80); // 80kb
   grid_lua_start_vm(&grid_lua_state, &(struct luaL_Reg){NULL, NULL}, grid_ui_state.lua_ui_init_callback);
-
-#define USB_NATIVE_SELECT_PIN 11
-#define USB_SOFT_SELECT_PIN 12
-
-  gpio_set_direction(USB_NATIVE_SELECT_PIN, GPIO_MODE_OUTPUT);
-  gpio_set_direction(USB_SOFT_SELECT_PIN, GPIO_MODE_OUTPUT);
-  gpio_set_level(USB_NATIVE_SELECT_PIN, 1);
-  gpio_set_level(USB_SOFT_SELECT_PIN, 1);
 
 #define PMIC_EN_PIN 48
 
@@ -457,41 +441,58 @@ void app_main(void) {
 
   TaskHandle_t uart_rx_task_hdl;
   TaskHandle_t uart_tx_task_hdl;
-  TaskHandle_t uart_housekeeping_task_hdl;
-  // Create daemon task
-  xTaskCreatePinnedToCore(host_lib_daemon_task, "daemon", 4096, (void*)signaling_sem, DAEMON_TASK_PRIORITY, &daemon_task_hdl, 1);
-  // Create the class driver task
-  xTaskCreatePinnedToCore(class_driver_task, "class", 4096, (void*)signaling_sem, CLASS_TASK_PRIORITY, &class_driver_task_hdl, 1);
-
-  // Create a task to handler UART event from ISR
 
   vTaskDelay(10); // Add a short delay to let the tasks run
 
   knot_midi_uart_init(&knot_midi_uart_state);
 
-  grid_platform_list_directory("");
+  grid_platform_lsdir("");
+
+  // --- persisted config (LittleFS is mounted by now) ------------------------
+  // USB operating mode is latched once, here, for the rest of this boot.
+  // A long-press of the mode button rewrites usbmode.cfg and reboots.
+  g_usb_mode = knot_usb_mode_read();
+  ESP_LOGI(TAG, "===== USB MODE: %s =====", g_usb_mode == KNOT_USB_MODE_INTERFACE ? "INTERFACE (USB-C device)" : "HOST (USB-A)");
 
   if (midi_config_file_read()) {
     ESP_LOGI(TAG, "Midi through enabled");
     knot_midi_uart_set_midithrough_state(&knot_midi_uart_state, true);
-    grid_led_set_layer_color(&grid_led_state, 2, GRID_LED_LAYER_UI_A, 0, 0, 255); // blue
   } else {
     ESP_LOGI(TAG, "Midi through disabled");
     knot_midi_uart_set_midithrough_state(&knot_midi_uart_state, false);
-    grid_led_set_layer_color(&grid_led_state, 2, GRID_LED_LAYER_UI_A, 0, 255, 0); // green
   }
+
+  // LED index 2 steady colour = MIDI-thru state (green off / blue on), both
+  // USB modes. "Waiting for the other end" pulses all 3 LEDs: white in host
+  // mode (knot_midi_usb.c), yellow in interface mode (knot_midi_usb_device.c).
+  // Red is only the long-press mode-change confirmation.
+  knot_status_led_update();
+
+  // Steer the external analog USB mux (GPIO11/GPIO12) to the right connector,
+  // then bring up exactly one USB stack (the ESP32-S3 has a single USB-OTG).
+  knot_usb_mode_apply_mux(g_usb_mode);
 
   xTaskCreatePinnedToCore(knot_midi_uart_rx_task, "uart_rx", 4096, (void*)signaling_sem, UART_RX_TASK_PRIORITY, &uart_rx_task_hdl, 1);
   xTaskCreatePinnedToCore(knot_midi_uart_tx_task, "uart_tx", 4096, (void*)signaling_sem, UART_TX_TASK_PRIORITY, &uart_tx_task_hdl, 1);
 
-  xTaskCreatePinnedToCore(knot_midi_usb_rx_task, "usb_rx", 4096, (void*)signaling_sem, USB_RX_TASK_PRIORITY, &uart_rx_task_hdl, 1);
-  xTaskCreatePinnedToCore(knot_midi_usb_tx_task, "usb_tx", 4096, (void*)signaling_sem, USB_TX_TASK_PRIORITY, &uart_tx_task_hdl, 1);
+  if (g_usb_mode == KNOT_USB_MODE_HOST) {
+    // Legacy path: USB host library + MIDI class driver on the USB-A port.
+    xTaskCreatePinnedToCore(host_lib_daemon_task, "daemon", 4096, (void*)signaling_sem, DAEMON_TASK_PRIORITY, &daemon_task_hdl, 1);
+    xTaskCreatePinnedToCore(class_driver_task, "class", 4096, (void*)signaling_sem, CLASS_TASK_PRIORITY, &class_driver_task_hdl, 1);
+    xTaskCreatePinnedToCore(knot_midi_usb_rx_task, "usb_rx", 4096, (void*)signaling_sem, USB_RX_TASK_PRIORITY, &uart_rx_task_hdl, 1);
+    xTaskCreatePinnedToCore(knot_midi_usb_tx_task, "usb_tx", 4096, (void*)signaling_sem, USB_TX_TASK_PRIORITY, &uart_tx_task_hdl, 1);
+  } else {
+    // New path: TinyUSB MIDI device + PC<->TRS bridge tasks on the USB-C port.
+    knot_midi_usb_device_start();
+  }
 
   // Register idle hook to force yield from idle task to lowest priority task
   esp_register_freertos_idle_hook_for_cpu(idle_hook, 0);
   esp_register_freertos_idle_hook_for_cpu(idle_hook, 1);
 
-  uint8_t last_button_state = 1;
+  uint8_t last_button_state = 1;    // 1 = released (idle-high)
+  uint64_t button_pressed_at = 0;   // us, valid while held (0 = not held)
+  bool longpress_armed = false;     // crossed the long-press threshold this hold
 
   UBaseType_t highwatermark = uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle());
   ESP_LOGI(TAG, "highwatermark before main loop: %d", highwatermark);
@@ -502,22 +503,45 @@ void app_main(void) {
 
     grid_esp32_utask_led(&timer_led);
 
+    // Drives both TRS_TX_AB_SELECT (GPIO15) and TRS_RX_AB_SELECT (GPIO16).
     knot_midi_uart_set_miditrsab_state(&knot_midi_uart_state, !gpio_get_level(SW_AB_PIN));
 
     uint8_t current_button_state = gpio_get_level(SW_MODE_PIN);
 
+    // --- press edge -------------------------------------------------------
     if (last_button_state == 1 && current_button_state == 0) {
+      button_pressed_at = grid_platform_rtc_get_micros();
+      longpress_armed = false;
+    }
 
-      if (knot_midi_uart_get_midithrough_state(&knot_midi_uart_state)) {
-        knot_midi_uart_set_midithrough_state(&knot_midi_uart_state, false);
-        grid_led_set_layer_color(&grid_led_state, 2, GRID_LED_LAYER_UI_A, 0, 255, 0);
-        midi_config_file_update(false);
+    // --- held: arm the USB-mode switch once past the threshold -----------
+    if (current_button_state == 0 && !longpress_armed && button_pressed_at != 0 &&
+        (grid_platform_rtc_get_micros() - button_pressed_at) >= (uint64_t)KNOT_USB_MODE_LONGPRESS_MS * 1000) {
+      longpress_armed = true;
+      // Solid red on all 3 LEDs = "long-press registered, release to switch".
+      grid_alert_all_set(&grid_led_state, 255, 0, 0, -1);
+    }
 
-      } else {
-        knot_midi_uart_set_midithrough_state(&knot_midi_uart_state, true);
-        grid_led_set_layer_color(&grid_led_state, 2, GRID_LED_LAYER_UI_A, 0, 0, 255);
-        midi_config_file_update(true);
+    // --- release edge --------------------------------------------------
+    if (last_button_state == 0 && current_button_state == 1) {
+
+      if (longpress_armed) {
+        // Change accepted: hold the red confirmation briefly, then reboot
+        // automatically into the other USB mode (no manual power-cycle).
+        ESP_LOGW(TAG, "mode button long-press -> toggle USB mode");
+        grid_alert_all_set(&grid_led_state, 255, 0, 0, -1);
+        vTaskDelay(pdMS_TO_TICKS(700));
+        knot_usb_mode_toggle_and_reboot(); // never returns
       }
+
+      // Short press: toggle MIDI-thru (TRS IN -> TRS OUT). LED index 2 flips
+      // green<->blue immediately (both USB modes) as the feedback.
+      bool next = !knot_midi_uart_get_midithrough_state(&knot_midi_uart_state);
+      knot_midi_uart_set_midithrough_state(&knot_midi_uart_state, next);
+      midi_config_file_update(next);
+      knot_status_led_update();
+
+      button_pressed_at = 0;
     }
 
     last_button_state = current_button_state;

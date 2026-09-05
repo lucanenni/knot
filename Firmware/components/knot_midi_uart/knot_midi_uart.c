@@ -33,7 +33,11 @@ void knot_midi_uart_set_midithrough_state(struct knot_midi_uart_model* midi_uart
 
 uint8_t knot_midi_uart_get_miditrsab_state(struct knot_midi_uart_model* midi_uart) { return midi_uart->midi_trs_ab_state; }
 void knot_midi_uart_set_miditrsab_state(struct knot_midi_uart_model* midi_uart, uint8_t state) {
+  // Drive both the OUT (TX) and IN (RX) jack A/B analog switches from the same
+  // hardware A/B slide switch, so MIDI TRS Type A/B applies to both directions.
+  // TODO(hw): confirm TRS_RX_AB_SELECT shares the TX polarity on real hardware.
   gpio_set_level(TRS_TX_AB_SELECT, state);
+  gpio_set_level(TRS_RX_AB_SELECT, state);
   midi_uart->midi_trs_ab_state = state;
 }
 
@@ -71,6 +75,9 @@ void knot_midi_uart_init(struct knot_midi_uart_model* midi_uart) {
 
   gpio_set_direction(TRS_TX_AB_SELECT, GPIO_MODE_OUTPUT);
   gpio_set_level(TRS_TX_AB_SELECT, 0);
+
+  gpio_set_direction(TRS_RX_AB_SELECT, GPIO_MODE_OUTPUT);
+  gpio_set_level(TRS_RX_AB_SELECT, 0);
 
 // Channel Voice Message Buffer
 #define UART_RX_BUFFER_CVM_SIZE 1600
